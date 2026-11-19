@@ -374,7 +374,7 @@ func grokPercents(t *testing.T, path string) (int, int) {
 // A context_window the user set by hand in one of magpie's tables stays
 // through a sync and a new pick (uk.jent on Discord: dozens of models told
 // 1M, set to 300K one by one, and written over on the next sync), while
-// the tables they didn't touch follow magpie's catalog.
+// the tables they didn't touch follow magpie's placement.
 func TestGrokKeepsAWindowSetByHand(t *testing.T) {
 	home, path := grokSandbox(t)
 	a := grok(home)
@@ -382,7 +382,7 @@ func TestGrokKeepsAWindowSetByHand(t *testing.T) {
 		t.Fatal(err)
 	}
 	if pro, flash := grokWindows(t, path); pro != 1000000 || flash != 200000 {
-		t.Fatalf("magpie's windows: pro %d, flash %d", pro, flash)
+		t.Fatalf("magpie's windows: pro %d, flash %d (the windows the user typed, kept as their own)", pro, flash)
 	}
 	if err := edit.SetTOMLKey(path, `model."magpie/deepseek/pro"`, "context_window", 300000); err != nil {
 		t.Fatal(err)
@@ -420,9 +420,9 @@ func TestGrokKeepsAWindowSetByHand(t *testing.T) {
 }
 
 // A config an older magpie wrote, with no record of what it gave: a window
-// other than the model's whole one is the user's and stays; the whole one,
-// which that magpie wrote, stays the whole window, and Long conversations
-// goes in its auto_compact_threshold_percent.
+// other than the model's whole one and other than the one magpie places
+// now is the user's and stays; the whole one, which an older magpie wrote,
+// is placed as magpie places it, and no percent is written.
 func TestGrokKeepsAWindowSetBeforeTheRecord(t *testing.T) {
 	home, path := grokSandbox(t)
 	os.MkdirAll(filepath.Dir(path), 0o755)
@@ -440,24 +440,25 @@ func TestGrokKeepsAWindowSetBeforeTheRecord(t *testing.T) {
 	if err := grok(home).Sync(); err != nil {
 		t.Fatal(err)
 	}
-	if pro, flash := grokWindows(t, path); pro != 300000 || flash != 200000 {
+	if pro, flash := grokWindows(t, path); pro != 300000 || flash != 176471 {
 		raw, _ := os.ReadFile(path)
-		t.Fatalf("pro %d (the user's 300000), flash %d (its whole 200000)\n%s", pro, flash, raw)
+		t.Fatalf("pro %d (the user's 300000), flash %d (placed: compacts at 150K)\n%s", pro, flash, raw)
 	}
-	if pro, flash := grokPercents(t, path); pro != 50 || flash != 75 {
+	if pro, flash := grokPercents(t, path); pro != -1 || flash != -1 {
 		raw, _ := os.ReadFile(path)
-		t.Fatalf("compact at 150K: pro %d%% of the user's 300K, flash %d%% of 200K\n%s", pro, flash, raw)
+		t.Fatalf("percents pro %d, flash %d, want none\n%s", pro, flash, raw)
 	}
 }
 
-// Grok Build compacts at a percent of context_window (85 by default,
-// grok-build's DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT), and context_window
-// is the model's window. magpie wrote Long conversations' threshold as the
-// window, so a 1M model told 300K compacted at 255K and never had its 1M
-// (@xiancrong on X). The window is the model's own and the threshold is a
-// percent of it, and a config the old magpie wrote, its threshold on
-// record, is brought up the same.
-func TestGrokWindowIsTheModelsAndCompactsAtThePercent(t *testing.T) {
+// Grok Build auto-compacts at 85% of context_window and its [model."<id>"]
+// tables take no auto_compact_threshold_percent (checked on 1.0.89 and
+// 1.0.91: one written was read off the table), so the window is placed
+// for where Long conversations compacts — magpie once wrote the threshold
+// as the window, so a 1M model told 300K compacted at 255K (@xiancrong on
+// X), and a percent on the whole window made a 1M model compact near 850K.
+// A config the old magpie wrote either way, its window on record, is
+// brought up the same.
+func TestGrokWindowPlacesWhereLongConversationsCompacts(t *testing.T) {
 	home, path := grokSandbox(t)
 	s := settings.Load()
 	s.CompactAt = 300000
@@ -470,13 +471,13 @@ func TestGrokWindowIsTheModelsAndCompactsAtThePercent(t *testing.T) {
 	}
 	check := func(when string) {
 		t.Helper()
-		if pro, flash := grokWindows(t, path); pro != 1000000 || flash != 200000 {
+		if pro, flash := grokWindows(t, path); pro != 352942 || flash != 200000 {
 			raw, _ := os.ReadFile(path)
-			t.Fatalf("%s: windows pro %d, flash %d, want the models' 1M and 200K\n%s", when, pro, flash, raw)
+			t.Fatalf("%s: windows pro %d (want 352942: 85%% is 300K), flash %d (its own)\n%s", when, pro, flash, raw)
 		}
-		if pro, flash := grokPercents(t, path); pro != 30 || flash != -1 {
+		if pro, flash := grokPercents(t, path); pro != -1 || flash != -1 {
 			raw, _ := os.ReadFile(path)
-			t.Fatalf("%s: percents pro %d (want 30: 300K of 1M), flash %d (want none)\n%s", when, pro, flash, raw)
+			t.Fatalf("%s: percents pro %d, flash %d, want none\n%s", when, pro, flash, raw)
 		}
 	}
 	check("new")
@@ -499,8 +500,8 @@ func TestGrokWindowIsTheModelsAndCompactsAtThePercent(t *testing.T) {
 }
 
 // An auto_compact_threshold_percent the user set in one of magpie's tables
-// stays, and one in [session], the user's for every model, is not
-// outranked by a per-model one of magpie's.
+// stays, and one in [session], the user's for every model, has the window
+// stay the model's own, magpie placing nothing over it.
 func TestGrokKeepsTheUsersCompactPercent(t *testing.T) {
 	home, path := grokSandbox(t)
 	s := settings.Load()
@@ -518,8 +519,8 @@ func TestGrokKeepsTheUsersCompactPercent(t *testing.T) {
 	if err := a.Sync(); err != nil {
 		t.Fatal(err)
 	}
-	if pro, flash := grokPercents(t, path); pro != 60 || flash != 75 {
-		t.Fatalf("pro set by hand to 60: pro %d, flash %d (want magpie's 75)", pro, flash)
+	if pro, flash := grokPercents(t, path); pro != 60 || flash != -1 {
+		t.Fatalf("pro set by hand to 60: pro %d, flash %d (want none of magpie's)", pro, flash)
 	}
 	if err := edit.SetTOMLKey(path, "session", "auto_compact_threshold_percent", 70); err != nil {
 		t.Fatal(err)
@@ -531,10 +532,14 @@ func TestGrokKeepsTheUsersCompactPercent(t *testing.T) {
 		raw, _ := os.ReadFile(path)
 		t.Fatalf("[session] at 70: pro %d (want the user's 60), flash %d (want none of magpie's)\n%s", pro, flash, raw)
 	}
+	if pro, flash := grokWindows(t, path); pro != 1000000 || flash != 200000 {
+		raw, _ := os.ReadFile(path)
+		t.Fatalf("[session] at 70: windows pro %d, flash %d, want the models' own\n%s", pro, flash, raw)
+	}
 }
 
 // Grok Build is told where Long conversations has Codex and Claude Code
-// compact, as a percent of the model's window: the size typed there on a
+// compact, as the window it compacts at 85% of: the size typed there on a
 // longer window, none under Full window, and a threshold set on the model
 // in its provider before either.
 func TestGrokWindowFollowsLongConversations(t *testing.T) {
@@ -556,30 +561,30 @@ func TestGrokWindowFollowsLongConversations(t *testing.T) {
 	}
 	want := func(when string, pro, flash int) {
 		t.Helper()
-		if p, f := grokWindows(t, path); p != 1000000 || f != 200000 {
-			t.Fatalf("%s: windows pro %d, flash %d, want the models' own", when, p, f)
+		if p, f := grokWindows(t, path); p != pro || f != flash {
+			t.Fatalf("%s: windows pro %d, flash %d, want %d and %d", when, p, f, pro, flash)
 		}
-		if p, f := grokPercents(t, path); p != pro || f != flash {
-			t.Fatalf("%s: percents pro %d, flash %d, want %d and %d", when, p, f, pro, flash)
+		if p, f := grokPercents(t, path); p != -1 || f != -1 {
+			t.Fatalf("%s: percents pro %d, flash %d, want none of magpie's", when, p, f)
 		}
 	}
 	set(func(s *settings.Settings) { s.CompactAt = 300000 })
-	want("compact at 300K", 30, -1)
+	want("compact at 300K", 352942, 200000)
 	set(func(s *settings.Settings) { s.FullContext = true })
-	want("full window", -1, -1)
+	want("full window", 1000000, 200000)
 	set(func(s *settings.Settings) {
 		s.FullContext, s.ModelCompacts = false, map[string]int{"deepseek/pro": 400000}
 	})
-	want("pro's own threshold", 40, -1)
+	want("pro's own threshold", 470589, 200000)
 	// Grok Build's own Long conversations (molianyin4227) over every
 	// agent's, a model's own still first; another agent's is not Grok's
 	set(func(s *settings.Settings) {
 		s.ModelCompacts, s.CompactAt = nil, 300000
 		s.AgentCompacts = map[string]settings.AgentCompact{"grok": {At: 500000}, "codex": {At: 250000}}
 	})
-	want("grok's own 500K", 50, -1)
+	want("grok's own 500K", 588236, 200000)
 	set(func(s *settings.Settings) { s.AgentCompacts = map[string]settings.AgentCompact{"grok": {Full: true}} })
-	want("grok's own full window", -1, -1)
+	want("grok's own full window", 1000000, 200000)
 	set(func(s *settings.Settings) { s.AgentCompacts = map[string]settings.AgentCompact{"codex": {Full: true}} })
-	want("codex's full window reached grok", 30, -1)
+	want("codex's full window reached grok", 352942, 200000)
 }
