@@ -43,11 +43,11 @@ var grokEfforts = []string{"none", "minimal", "low", "medium", "high", "xhigh", 
 var grokModelTable = `model."` + magpieID + "/"
 
 // grokModelTables are magpie's model tables, for a Grok that reaches the
-// gateway's /v1 at v1, with the context_window and the
-// auto_compact_threshold_percent magpie gives each model (by its catalog
-// id), which the caller stashes. A value the user set in a table themselves
-// (grokOwnWindow, grokOwnPercent: had is what the tables hold now, wrote and
-// wrotePct what magpie last gave them) stays as they set it.
+// gateway's /v1 at v1, with the context_window magpie gives each model (by
+// its catalog id), which the caller stashes. A value the user set in a
+// table themselves (grokOwnWindow, grokOwnPercent: had is what the tables
+// hold now, wrote and wrotePct what magpie last gave them) stays as they
+// set it.
 func grokModelTables(v1 string, had grokHad, wrote, wrotePct map[string]int) ([]edit.Table, map[string]int, map[string]int) {
 	var out []edit.Table
 	st, gave, gavePct := settings.Load().ForAgent("grok"), map[string]int{}, map[string]int{}
@@ -61,16 +61,24 @@ func grokModelTables(v1 string, had grokHad, wrote, wrotePct map[string]int) ([]
 		}
 		window := 0
 		if c := m.Context; c > 0 {
-			gave[m.ID], window = c, c
-			if n, ok := grokOwnWindow(m, c, had.windows, wrote); ok {
+			// under a [session] percent, the user's for every model, the
+			// window stays the model's own and they alone say when it
+			// compacts
+			placed := c
+			if !had.sessionPercent {
+				placed = grokWindow(c, grokCompactAt(st, m))
+			}
+			gave[m.ID] = placed
+			window = placed
+			if n, ok := grokOwnWindow(m, placed, had.windows, wrote); ok {
 				window = n
 			}
 			kvs = append(kvs, edit.KV{Path: "context_window", Value: window})
 		}
+		// a percent magpie has no record of giving is the user's and
+		// stays; magpie's own reach is the window above, so it writes no
+		// percent of its own
 		if p, ok := grokOwnPercent(m, had.percents, wrotePct); ok {
-			kvs = append(kvs, edit.KV{Path: "auto_compact_threshold_percent", Value: p})
-		} else if p := grokPercent(grokCompactAt(st, m), window); p > 0 && !had.sessionPercent {
-			gavePct[m.ID] = p
 			kvs = append(kvs, edit.KV{Path: "auto_compact_threshold_percent", Value: p})
 		}
 		var efforts []string
@@ -104,21 +112,24 @@ func grokCompactAt(st settings.Settings, m catalog.Model) int {
 	return st.Working(c)
 }
 
-// grokPercent is the auto_compact_threshold_percent that has Grok Build
-// compact at tokens on a window of window: 0 (Grok's own default) when it
-// compacts at none of it. Grok Build's context_window is the model's
-// window, sent to the model and shown as such, and it compacts at a
-// percent of it, 85 unless [model.<id>] or [session]
-// auto_compact_threshold_percent says otherwise (grok-build's
-// resolve_auto_compact_threshold_percent). magpie once wrote the
-// threshold as the window, so a 1M model told 300K compacted at 255K and
-// never reached 300K (@xiancrong on X). Rounded down, so it never
-// compacts later than tokens.
-func grokPercent(tokens, window int) int {
-	if tokens <= 0 || window <= 0 || tokens >= window {
-		return 0
+// grokWindow is the context_window that has Grok Build compact at tokens
+// on a model whose whole window is c: it auto-compacts at 85% of
+// context_window (its DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT), and a
+// [model."<id>"] table takes no auto_compact_threshold_percent —
+// 1.0.89 and 1.0.91 read the key off the table (a table told 27% sat at
+// 72% of its window un-compacted and first compacted at the default), so
+// the window is the one knob and 4f94b8a8's percent never reached it —
+// rounded up, so it never compacts before tokens, and never over c,
+// where Grok's 85% is the closest it can come. tokens at or above c, or
+// none, is the model's own window.
+func grokWindow(c, tokens int) int {
+	if tokens <= 0 || tokens >= c {
+		return c
 	}
-	return max(1, tokens*100/window)
+	if w := (tokens*20 + 16) / 17; w < c {
+		return w
+	}
+	return c
 }
 
 // grokOwnWindow is a context_window the user set in magpie's table for m
@@ -128,13 +139,13 @@ func grokPercent(tokens, window int) int {
 // an older magpie wrote, and other than w, which magpie gives it now.
 func grokOwnWindow(m catalog.Model, w int, had, wrote map[string]int) (int, bool) {
 	n, ok := had[m.ID]
-	if !ok || n <= 0 || n == w {
+	if !ok || n <= 0 || n == w || n == m.Context {
 		return 0, false
 	}
 	if prev, ok := wrote[m.ID]; ok {
 		return n, n != prev
 	}
-	return n, n != m.Context
+	return n, true
 }
 
 // grokOwnPercent is an auto_compact_threshold_percent the user set in
